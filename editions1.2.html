@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Balatro Card Effects</title>
+<style>
+  body { font-family: sans-serif; }
+  canvas { border: 1px solid #999; max-width: 100%; height: auto; image-rendering: pixelated; }
+  .wrap { display: inline-block; }
+  .wrap.dragover { outline: 2px solid #000; }
+  label { display: block; margin: 4px 0; }
+  fieldset { max-width: 360px; margin-bottom: 10px; }
+  .row { display:flex; align-items:center; gap:8px; }
+  .row input[type=range]{ flex:1; }
+  .stack label { display:inline-flex; align-items:center; gap:5px; margin-right:12px; }
+  .fx { border:1px solid #ccc; padding:6px 10px; margin:6px 0; }
+  .fx.off { opacity:0.45; }
+  .fx h4 { margin:4px 0; }
+</style>
+</head>
+<body>
+
+<div class="wrap" id="wrap">
+  <canvas id="gl" width="420" height="560"></canvas>
+  <div id="hint">Drop an image here, or pick a file bellow.</div>
+</div>
+
+<fieldset class="stack">
+  <legend>Effets (stack in order)</legend>
+  <label><input type="checkbox" id="en_negative"> Negative</label>
+  <label><input type="checkbox" id="en_polychrome" checked> Polychrome</label>
+  <label><input type="checkbox" id="en_foil"> Foil</label>
+  <label><input type="checkbox" id="en_holo"> Holographic</label>
+  <label><input type="checkbox" id="en_trans"> Trans</label>
+</fieldset>
+
+<div class="fx off" id="fx_trans">
+  <h4>Trans</h4>
+  <label>Pattern <input type="range" id="tx" min="0" max="6.28" step="0.01" value="1.0"> <span id="txv">1.00</span></label>
+  <label>Hue shift <input type="range" id="ty" min="0" max="6.28" step="0.01" value="0.9"> <span id="tyv">0.90</span></label>
+</div>
+
+<div class="fx" id="fx_polychrome">
+  <h4>Polychrome</h4>
+  <label>Pattern <input type="range" id="px" min="0" max="6.28" step="0.01" value="1.0"> <span id="pxv">1.00</span></label>
+  <label>Hue shift <input type="range" id="py" min="0" max="6.28" step="0.01" value="0.9"> <span id="pyv">0.90</span></label>
+  <label>Saturaton boost <input type="range" id="st" min="0" max="0.6" step="0.01" value="0.5"> <span id="stv">0.50</span></label>
+</div>
+
+<div class="fx off" id="fx_foil">
+  <h4>Foil</h4>
+  <label>Phase X <input type="range" id="foilx" min="0" max="6.28" step="0.01" value="1.0"> <span id="foilxv">1.00</span></label>
+  <label>Phase Y <input type="range" id="foily" min="0" max="6.28" step="0.01" value="1.0"> <span id="foilyv">1.00</span></label>
+  <label>Colour mix <input type="range" id="foilmix" min="0" max="1" step="0.01" value="0.55"> <span id="foilmixv">0.55</span></label>
+</div>
+
+<div class="fx off" id="fx_holo">
+  <h4>Holographic</h4>
+  <label>Pattern <input type="range" id="holox" min="0" max="6.28" step="0.01" value="1.0"> <span id="holoxv">1.00</span></label>
+</div>
+
+<div class="fx" id="fx_negative">
+  <h4>Negative</h4>
+  <label>Shine strength <input type="range" id="negstr" min="0" max="1" step="0.01" value="0.6"> <span id="negstrv">0.60</span></label>
+</div>
+
+<fieldset>
+  <legend>Loop & Export</legend>
+  <label>Effect grid (px) <input type="range" id="grid" min="16" max="560" step="1" value="71"> <span id="grid_v">71</span></label>
+  <label><input type="checkbox" id="gridfull"> Snap grid to image resolution</label>
+  <label>Motion (cycles/loop) <input type="range" id="cyc" min="1" max="6" step="1" value="1"> <span id="cyc_v">1</span></label>
+  <label>Loop length (s) <input type="range" id="dur" min="2" max="180" step="0.5" value="20"> <span id="dur_v">20.0</span></label>
+  <label>FPS <input type="range" id="fps" min="12" max="60" step="1" value="30"> <span id="fps_v">30</span></label>
+  <p><input type="file" id="file" accept="image/*,video/*"></p>
+  <p>
+    <button id="pause">Pause</button>
+    <button id="exportApng" disabled>Export APNG</button>
+    <button id="exportWebp" disabled>Export WebP</button>
+  </p>
+  <p id="status"></p>
+</fieldset>
+
+<script>
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl', {
+  preserveDrawingBuffer:true,
+  premultipliedAlpha:false,
+  alpha:true
+});
+gl.enable(gl.BLEND);
+gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+const vert = `
+attribute vec2 a_pos; varying vec2 v_uv;
+void main(){ v_uv=vec2(a_pos.x*0.5+0.5, 1.0-(a_pos.y*0.5+0.5)); gl_Position=vec4(a_pos,0.0,1.0); }`;
+
+const frag = `
+precision highp float;
+varying vec2 v_uv;
+uniform sampler2D u_tex;
+uniform vec2 u_res;
+uniform vec2 u_grid;
+uniform float u_aspect;
+uniform float u_phase;
+uniform float u_cycles;
+
+uniform float u_en_negative;
+uniform float u_en_polychrome;
+uniform float u_en_foil;
+uniform float u_en_holo;
+uniform float u_en_trans;
+
+uniform vec2 u_polychrome;
+uniform float u_satboost;
+uniform vec2 u_foil;
+uniform float u_foilmix;
+uniform float u_holox;
+uniform float u_negstr;
+uniform vec2 u_trans;
+
+const float TAU = 6.28318530718;
+
+float hue(float s,float t,float h){ float hs=mod(h,1.0)*6.0;
+  if(hs<1.0) return (t-s)*hs+s; if(hs<3.0) return t;
+  if(hs<4.0) return (t-s)*(4.0-hs)+s; return s; }
+vec4 RGB(vec4 c){ if(c.y<0.0001) return vec4(vec3(c.z),c.a);
+  float t=(c.z<0.5)?c.y*c.z+c.z:-c.y*c.z+(c.y+c.z); float s=2.0*c.z-t;
+  return vec4(hue(s,t,c.x+1.0/3.0),hue(s,t,c.x),hue(s,t,c.x-1.0/3.0),c.w); }
+vec4 HSL(vec4 c){ float low=min(c.r,min(c.g,c.b)); float high=max(c.r,max(c.g,c.b));
+  float delta=high-low; float sum=high+low; vec4 hsl=vec4(0.0,0.0,0.5*sum,c.a);
+  if(delta==0.0) return hsl; hsl.y=(hsl.z<0.5)?delta/sum:delta/(2.0-sum);
+  if(high==c.r) hsl.x=(c.g-c.b)/delta; else if(high==c.g) hsl.x=(c.b-c.r)/delta+2.0;
+  else hsl.x=(c.r-c.g)/delta+4.0; hsl.x=mod(hsl.x/6.0,1.0); return hsl; }
+
+vec4 fx_negative(vec4 tex, vec2 uv, float a){
+  vec4 SAT = HSL(tex);
+  SAT.b = 1.0 - SAT.b;
+  SAT.r = -SAT.r + 0.2;
+  vec4 o = RGB(SAT) + 0.8*vec4(79.0/255.0, 99.0/255.0, 103.0/255.0, 0.0);
+  if (o.a < 0.7) o.a = o.a/3.0;
+  return o;
+}
+
+vec4 fx_negative_shine(vec4 tex, vec2 uv, float a){
+  float ns = a;
+  float low = min(tex.r, min(tex.g, tex.b));
+  float high = max(tex.r, max(tex.g, tex.b));
+  float delta = high-low;
+
+  float fac = 0.8 + 0.9*sin(13.*uv.x+5.32*uv.y + ns*12. + cos(ns*5.3 + uv.y*4.2 - uv.x*4.));
+  float fac2 = 0.5 + 0.5*sin(10.*uv.x+2.32*uv.y + ns*5. - cos(ns*2.3 + uv.x*8.2));
+  float fac3 = 0.5 + 0.5*sin(12.*uv.x+6.32*uv.y + ns*6.111 + sin(ns*5.3 + uv.y*3.2));
+  float fac4 = 0.5 + 0.5*sin(4.*uv.x+2.32*uv.y + ns*8.111 + sin(ns*1.3 + uv.y*13.2));
+  float fac5 = sin(0.5*16.*uv.x+5.32*uv.y + ns*12. + cos(ns*5.3 + uv.y*4.2 - uv.x*4.));
+
+  float maxfac = 0.6*max(max(fac, max(fac2, max(fac3,0.0))) + (fac+fac2+fac3*fac4), 0.);
+
+  vec4 sh = tex;
+  sh.rgb = tex.rgb*0.5 + vec3(0.4, 0.4, 0.8);
+  sh.r = sh.r - delta + delta*maxfac*(0.7 + fac5*0.07) - 0.1;
+  sh.g = sh.g - delta + delta*maxfac*(0.7 - fac5*0.17) - 0.1;
+  sh.b = sh.b - delta + delta*maxfac*0.7 - 0.1;
+  float sha = tex.a*(0.8*max(min(1., max(0.,0.3*max(low*0.2, delta)+ min(max(maxfac*0.1,0.), 0.4)) ), 0.) + 0.15*maxfac*(0.1+delta)) * u_negstr;
+  return vec4(sh.rgb, sha);
+}
+
+vec4 fx_polychrome(vec4 tex, vec2 uv, float a){
+  float low=min(tex.r,min(tex.g,tex.b)); float high=max(tex.r,max(tex.g,tex.b));
+  float delta=high-low; float sat_fac=1.0-max(0.0,0.05*(1.1-delta));
+  vec4 hsl = HSL(vec4(tex.r*sat_fac, tex.g*sat_fac, tex.b, tex.a));
+  vec2 floored_uv = floor(uv*u_grid)/u_grid;
+  vec2 c = (floored_uv-0.5)*50.0;
+  vec2 field_part1 = c + 50.0*vec2(sin(a),     cos(a));
+  vec2 field_part2 = c + 50.0*vec2(cos(2.0*a), cos(3.0*a));
+  vec2 field_part3 = c + 50.0*vec2(sin(2.0*a), sin(a));
+  float field = (1.0 + (
+    cos(length(field_part1)/19.483) +
+    sin(length(field_part2)/33.155)*cos(field_part2.y/15.73) +
+    cos(length(field_part3)/27.193)*sin(field_part3.x/21.92)))/2.0;
+  float res = (0.5 + 0.5*cos((u_polychrome.x)*2.612 + (field-0.5)*3.14));
+  hsl.x = hsl.x + res + u_polychrome.y*0.04;
+  hsl.y = min(u_satboost+0.1, hsl.y+u_satboost);
+  tex.rgb = RGB(hsl).rgb;
+  if (tex.a < 0.7) tex.a = tex.a / 3.0;
+  return tex;
+}
+
+vec4 fx_foil(vec4 tex, vec2 uv, float a){
+  vec2 adjusted_uv = uv - vec2(0.5, 0.5);
+  adjusted_uv.x = adjusted_uv.x*u_aspect;
+  float fr = u_foil.x + 0.15*sin(a);
+  float fg = u_foil.y + 0.15*cos(a);
+  float low = min(tex.r, min(tex.g, tex.b));
+  float high = max(tex.r, max(tex.g, tex.b));
+  float delta = min(high, max(0.5, 1.0 - low));
+  float fac = max(min(2.0*sin((length(90.0*adjusted_uv) + fr*2.0) + 3.0*(1.0+0.8*cos(length(113.1121*adjusted_uv) - fr*3.121))) - 1.0 - max(5.0-length(90.0*adjusted_uv), 0.0), 1.0), 0.0);
+  vec2 rotater = vec2(cos(fr*0.1221), sin(fr*0.3512));
+  float al = max(length(adjusted_uv), 0.0001);
+  float angle = dot(rotater, adjusted_uv)/(length(rotater)*al);
+  float fac2 = max(min(5.0*cos(fg*0.3 + angle*3.14*(2.2+0.9*sin(fr*1.65 + 0.2*fg))) - 4.0 - max(2.0-length(20.0*adjusted_uv), 0.0), 1.0), 0.0);
+  float fac3 = 0.3*max(min(2.0*sin(fr*5.0 + uv.x*3.0 + 3.0*(1.0+0.5*cos(fr*7.0))) - 1.0, 1.0), -1.0);
+  float fac4 = 0.3*max(min(2.0*sin(fr*6.66 + uv.y*3.8 + 3.0*(1.0+0.5*cos(fr*3.414))) - 1.0, 1.0), -1.0);
+  float maxfac = max(max(fac, max(fac2, max(fac3, max(fac4, 0.0)))) + 2.2*(fac+fac2+fac3+fac4), 0.0);
+  vec4 foiled = tex;
+  foiled.r = tex.r-delta + delta*maxfac*0.3;
+  foiled.g = tex.g-delta + delta*maxfac*0.3;
+  foiled.b = tex.b + delta*maxfac*1.9;
+  foiled.a = min(tex.a, 0.3*tex.a + 0.9*min(0.5, maxfac*0.1));
+  vec3 rgb = mix(tex.rgb, foiled.rgb, u_foilmix);
+  float oa = mix(tex.a, foiled.a, u_foilmix);
+  return vec4(rgb, oa);
+}
+
+vec4 fx_holo(vec4 tex, vec2 uv, float a){
+  vec4 hsl = HSL(0.5*tex + 0.5*vec4(0.0,0.0,1.0,tex.a));
+  vec2 floored_uv = floor(uv*u_grid)/u_grid;
+  vec2 c = (floored_uv-0.5)*250.0;
+  vec2 field_part1 = c + 50.0*vec2(sin(a),     cos(a));
+  vec2 field_part2 = c + 50.0*vec2(cos(2.0*a), cos(3.0*a));
+  vec2 field_part3 = c + 50.0*vec2(sin(2.0*a), sin(a));
+  float field = (1.0 + (
+    cos(length(field_part1)/19.483) +
+    sin(length(field_part2)/33.155)*cos(field_part2.y/15.73) +
+    cos(length(field_part3)/27.193)*sin(field_part3.x/21.92)))/2.0;
+  float res = (0.5 + 0.5*cos((u_holox)*2.612 + (field-0.5)*3.14));
+  float low = min(tex.r, min(tex.g, tex.b));
+  float high = max(tex.r, max(tex.g, tex.b));
+  float delta = 0.2+0.3*(high-low) + 0.1*high;
+  float gridsize = 0.79;
+  float imgAspect = u_res.x/u_res.y;
+  float cardAspect = u_aspect;
+  vec2 guv = vec2((uv.x-0.5)*(imgAspect/cardAspect) + 0.5, uv.y);
+  float fac = 0.5*max(max(max(0.0, 7.0*abs(cos(guv.x*gridsize*20.0))-6.0), max(0.0, 7.0*cos(guv.y*gridsize*45.0 + guv.x*gridsize*20.0)-6.0)), max(0.0, 7.0*cos(guv.y*gridsize*45.0 - guv.x*gridsize*20.0)-6.0));
+  hsl.x = hsl.x + res + fac;
+  hsl.y = hsl.y*1.3;
+  hsl.z = hsl.z*0.6+0.4;
+  tex = (1.0-delta)*tex + delta*RGB(hsl)*vec4(0.9,0.8,1.2,tex.a);
+  if (tex.a < 0.7) tex.a = tex.a/3.0;
+  return tex;
+}
+
+vec4 fx_trans(vec4 tex, vec2 uv, float a){
+  float low=min(tex.r,min(tex.g,tex.b)); float high=max(tex.r,max(tex.g,tex.b));
+  float delta=high-low; float sat_fac=1.0-max(0.0,0.05*(1.1-delta));
+  vec4 hsl = HSL(vec4(tex.r*sat_fac, tex.g*sat_fac, tex.b, tex.a));
+  vec2 floored_uv = floor(uv*u_grid)/u_grid;
+  vec2 c = (floored_uv-0.5)*50.0;
+  vec2 field_part1 = c + 50.0*vec2(sin(a),     cos(a));
+  vec2 field_part2 = c + 50.0*vec2(cos(2.0*a), cos(3.0*a));
+  vec2 field_part3 = c + 50.0*vec2(sin(2.0*a), sin(a));
+  float field = (1.0 + (
+    cos(length(field_part1)/19.483) +
+    sin(length(field_part2)/33.155)*cos(field_part2.y/15.73) +
+    cos(length(field_part3)/27.193)*sin(field_part3.x/21.92)))/2.0;
+  float res = (0.5 + 0.5*cos((u_trans.x)*2.612 + (field-0.5)*3.14));
+  float blue_hue = 0.55;
+  float pink_hue = 0.95;
+  float cycle = (res + u_trans.y*0.04) * 2.0;
+  float band = 0.5 - 0.5*cos(cycle*6.28318);
+  float edge = smoothstep(0.42, 0.58, band);
+  hsl.x = mix(blue_hue, pink_hue, edge);
+  hsl.y = min(0.6, hsl.y+0.5) * mix(1.0, 0.8, edge);
+  hsl.z = min(1.0, hsl.z + 0.18*edge);
+  tex.rgb = RGB(hsl).rgb;
+  if (tex.a < 0.7) tex.a = tex.a / 3.0;
+  return tex;
+}
+
+void main(){
+  vec4 orig = texture2D(u_tex, v_uv);
+  vec2 uv = v_uv;
+  float a = TAU * u_phase * u_cycles;
+  vec4 tex = orig;
+
+  if (u_en_negative > 0.5) {
+      tex = fx_negative(orig, uv, a);
+  }
+  if (u_en_polychrome > 0.5) {
+      vec4 p = fx_polychrome(orig, uv, a);
+      tex = vec4(mix(tex.rgb, p.rgb, p.a), max(tex.a, p.a));
+  }
+  if (u_en_foil > 0.5) {
+      vec4 p = fx_foil(orig, uv, a);
+      tex = vec4(mix(tex.rgb, p.rgb, p.a), max(tex.a, p.a));
+  }
+  if (u_en_holo > 0.5) {
+      vec4 p = fx_holo(orig, uv, a);
+      tex = vec4(mix(tex.rgb, p.rgb, p.a), max(tex.a, p.a));
+  }
+  if (u_en_trans > 0.5) {
+      vec4 p = fx_trans(orig, uv, a);
+      tex = vec4(mix(tex.rgb, p.rgb, p.a), max(tex.a, p.a));
+  }
+  if (u_en_negative > 0.5) {
+      vec4 p = fx_negative_shine(fx_negative(orig, uv, a), uv, a);
+      tex = vec4(mix(tex.rgb, p.rgb, p.a), max(tex.a, p.a));
+  }
+
+  if (tex.a < 0.004) { gl_FragColor = vec4(0.0); return; }
+  gl_FragColor = tex;
+}`;
+
+function compile(type,src){ const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; }
+const prog=gl.createProgram();
+gl.attachShader(prog,compile(gl.VERTEX_SHADER,vert));
+gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,frag));
+gl.linkProgram(prog); gl.useProgram(prog);
+
+const buf=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+const aPos=gl.getAttribLocation(prog,'a_pos'); gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,0,0);
+
+const U={};
+['u_res','u_grid','u_aspect','u_phase','u_cycles','u_en_negative','u_en_polychrome','u_en_foil','u_en_holo','u_en_trans',
+ 'u_polychrome','u_satboost','u_foil','u_foilmix','u_holox','u_negstr','u_trans'].forEach(n=>U[n]=gl.getUniformLocation(prog,n));
+
+let tex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,tex);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+
+let imgW=420,imgH=560,hasMedia=false,isVideo=false,videoEl=null,paused=false,t0=performance.now();
+const $=id=>document.getElementById(id);
+
+function loadImage(img){
+  try {
+    const maxW=560; let w=img.naturalWidth,h=img.naturalHeight;
+    if(!w||!h){ $('status').textContent='Could not read image dimensions.'; return; }
+    if(w>maxW){ h=Math.round(h*maxW/w); w=maxW; }
+    imgW=w; imgH=h; canvas.width=w; canvas.height=h;
+    gl.viewport(0,0,w,h); gl.bindTexture(gl.TEXTURE_2D,tex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img);
+    if(videoEl){ videoEl.pause(); videoEl.src=''; videoEl=null; }
+    isVideo=false;
+    hasMedia=true;
+    $('hint').style.display='none';
+    $('exportApng').disabled=false;
+    $('exportWebp').disabled=false;
+    $('status').textContent='';
+    t0=performance.now();
+    drawPhase(0);
+  } catch(err){
+    $('status').textContent='Error loading image: '+err.message;
+    console.error(err);
+  }
+}
+function handleFile(f){
+  if(!f){ return; }
+  if(f.type.startsWith('video/')){
+    const v=document.createElement('video');
+    v.muted=true; v.loop=true; v.playsInline=true;
+    v.onloadeddata=()=>{
+      const maxW=560; let w=v.videoWidth,h=v.videoHeight;
+      if(!w||!h){ $('status').textContent='Could not read video dimensions.'; return; }
+      if(w>maxW){ h=Math.round(h*maxW/w); w=maxW; }
+      imgW=w; imgH=h; canvas.width=w; canvas.height=h;
+      gl.viewport(0,0,w,h);
+      if(videoEl){ videoEl.pause(); videoEl.src=''; }
+      isVideo=true; hasMedia=true; videoEl=v;
+      $('hint').style.display='none';
+      $('exportApng').disabled=false; $('exportWebp').disabled=false;
+      $('status').textContent='';
+      if(!isNaN(v.duration) && v.duration!==Infinity && v.duration>0){
+        $('dur').value=v.duration.toFixed(1);
+        $('dur_v').textContent=v.duration.toFixed(1);
+      }
+      v.play(); t0=performance.now();
+      if(paused){ paused=false; $('pause').textContent='Pause'; }
+    };
+    v.onerror=()=>{ $('status').textContent='Error loading video.'; };
+    v.src=URL.createObjectURL(f);
+  } else if(f.type.startsWith('image/')){
+    const img=new Image();
+    img.onload=()=>loadImage(img);
+    img.onerror=()=>{ $('status').textContent='The browser could not decode that image.'; };
+    img.src=URL.createObjectURL(f);
+  } else {
+    $('status').textContent='That file is not an image or video.';
+  }
+}
+
+[['px','pxv'],['py','pyv'],['st','stv'],['foilx','foilxv'],['foily','foilyv'],['foilmix','foilmixv'],
+ ['holox','holoxv'],['negstr','negstrv'],['grid','grid_v'],['cyc','cyc_v'],['dur','dur_v'],['fps','fps_v'],
+ ['tx','txv'],['ty','tyv']].forEach(([a,b])=>{
+  $(a).addEventListener('input',()=>{ const v=+$(a).value; $(b).textContent = (a==='fps'||a==='cyc'||a==='grid')? v : v.toFixed(2); });
+});
+
+function syncPanels(){
+  [['negative','fx_negative'],['polychrome','fx_polychrome'],['foil','fx_foil'],['holo','fx_holo'],['trans','fx_trans']].forEach(([k,p])=>{
+    $(p).classList.toggle('off', !$('en_'+k).checked);
+  });
+}
+['en_negative','en_polychrome','en_foil','en_holo','en_trans'].forEach(id=>$(id).addEventListener('change',syncPanels));
+$('gridfull').addEventListener('change',()=>{ $('grid').disabled=$('gridfull').checked; });
+syncPanels();
+
+$('file').onchange=e=>handleFile(e.target.files[0]);
+$('pause').onclick=()=>{
+  paused=!paused;
+  $('pause').textContent=paused?'Play':'Pause';
+  if(!paused){
+    t0=performance.now();
+    if(isVideo && videoEl) videoEl.play();
+  } else {
+    if(isVideo && videoEl) videoEl.pause();
+  }
+};
+
+const wrap=$('wrap');
+['dragenter','dragover'].forEach(e=>wrap.addEventListener(e,ev=>{ev.preventDefault();wrap.classList.add('dragover');}));
+['dragleave','drop'].forEach(e=>wrap.addEventListener(e,ev=>{ev.preventDefault();wrap.classList.remove('dragover');}));
+wrap.addEventListener('drop',ev=>handleFile(ev.dataTransfer.files[0]));
+
+function drawPhase(p){
+  gl.uniform2f(U.u_res,imgW,imgH);
+  gl.uniform1f(U.u_aspect, 71.0/95.0);
+  if($('gridfull').checked){
+    gl.uniform2f(U.u_grid,imgW,imgH);
+  }else{
+    const g=+$('grid').value;
+    gl.uniform2f(U.u_grid,g,Math.round(g*imgH/imgW));
+  }
+  gl.uniform1f(U.u_phase,p);
+  gl.uniform1f(U.u_cycles,Math.round(+$('cyc').value));
+  gl.uniform1f(U.u_en_negative,$('en_negative').checked?1:0);
+  gl.uniform1f(U.u_en_polychrome,$('en_polychrome').checked?1:0);
+  gl.uniform1f(U.u_en_foil,$('en_foil').checked?1:0);
+  gl.uniform1f(U.u_en_holo,$('en_holo').checked?1:0);
+  gl.uniform1f(U.u_en_trans,$('en_trans').checked?1:0);
+  gl.uniform2f(U.u_polychrome,+$('px').value,+$('py').value);
+  gl.uniform2f(U.u_trans,+$('tx').value,+$('ty').value);
+  gl.uniform1f(U.u_satboost,+$('st').value);
+  gl.uniform2f(U.u_foil,+$('foilx').value,+$('foily').value);
+  gl.uniform1f(U.u_foilmix,+$('foilmix').value);
+  gl.uniform1f(U.u_holox,+$('holox').value);
+  gl.uniform1f(U.u_negstr,+$('negstr').value);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  if(hasMedia) gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+}
+
+function render(){
+  if(!paused){
+    const dur=+$('dur').value;
+    const p=((performance.now()-t0)/1000 % dur)/dur;
+    if(isVideo && videoEl && videoEl.readyState >= 2){
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, videoEl);
+    }
+    drawPhase(p);
+  }
+  requestAnimationFrame(render);
+}
+gl.clearColor(0,0,0,0);
+render();
+
+async function captureFrames(mime,quality){
+  const fps=+$('fps').value, dur=+$('dur').value;
+  const total=Math.round(fps*dur);
+  const frames=[];
+  for(let i=0;i<total;i++){
+    const p = i/total;
+    if(isVideo && videoEl){
+      videoEl.currentTime = (i / fps) % videoEl.duration;
+      await new Promise(r=>{
+        const onSeek = ()=>{ videoEl.removeEventListener('seeked', onSeek); r(); };
+        videoEl.addEventListener('seeked', onSeek);
+        setTimeout(()=>{ videoEl.removeEventListener('seeked', onSeek); r(); }, 1000);
+      });
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, videoEl);
+    }
+    drawPhase(p);
+    const blob=await new Promise(r=>canvas.toBlob(r,mime,quality));
+    frames.push(new Uint8Array(await blob.arrayBuffer()));
+    $('status').textContent='rendering '+(i+1)+'/'+total;
+    await new Promise(r=>setTimeout(r));
+  }
+  return {frames,fps,total};
+}
+
+$('exportApng').onclick=async ()=>{
+  if(!hasMedia) return;
+  $('exportApng').disabled=true; $('exportWebp').disabled=true; paused=true; $('pause').textContent='Play';
+  if(isVideo && videoEl) videoEl.pause();
+  const {frames,fps,total}=await captureFrames('image/png');
+  $('status').textContent='assembling APNG…';
+  const apng=muxAPNG(frames,canvas.width,canvas.height,1,fps);
+  const url=URL.createObjectURL(new Blob([apng],{type:'image/png'}));
+  const a=document.createElement('a'); a.href=url; a.download='card_effect.png'; a.click();
+  $('status').textContent='done · saved card_effect.png (APNG, '+total+' frames)';
+  $('exportApng').disabled=false; $('exportWebp').disabled=false; paused=false; $('pause').textContent='Pause'; t0=performance.now();
+  if(isVideo && videoEl) videoEl.play();
+};
+
+$('exportWebp').onclick=async ()=>{
+  if(!hasMedia) return;
+  $('exportApng').disabled=true; $('exportWebp').disabled=true; paused=true; $('pause').textContent='Play';
+  if(isVideo && videoEl) videoEl.pause();
+  const {frames,fps,total}=await captureFrames('image/webp',1.0);
+  $('status').textContent='assembling WebP…';
+  const webp=muxWebP(frames,canvas.width,canvas.height,1000/fps);
+  const url=URL.createObjectURL(new Blob([webp],{type:'image/webp'}));
+  const a=document.createElement('a'); a.href=url; a.download='card_effect.webp'; a.click();
+  $('status').textContent='done · saved card_effect.webp ('+total+' frames)';
+  $('exportApng').disabled=false; $('exportWebp').disabled=false; paused=false; $('pause').textContent='Pause'; t0=performance.now();
+  if(isVideo && videoEl) videoEl.play();
+};
+
+const CRC_TABLE=(function(){ const t=new Uint32Array(256);
+  for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); t[n]=c>>>0; }
+  return t; })();
+function crc32(bytes){ let c=0xFFFFFFFF;
+  for(let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&0xFF]^(c>>>8);
+  return (c^0xFFFFFFFF)>>>0; }
+
+function Buf(){ this.a=new Uint8Array(1<<16); this.n=0; }
+Buf.prototype.ensure=function(k){ if(this.n+k<=this.a.length) return;
+  let cap=this.a.length; while(cap<this.n+k) cap*=2;
+  const b=new Uint8Array(cap); b.set(this.a.subarray(0,this.n)); this.a=b; };
+Buf.prototype.u8=function(v){ this.ensure(1); this.a[this.n++]=v&255; };
+Buf.prototype.bytes=function(arr){ this.ensure(arr.length); this.a.set(arr,this.n); this.n+=arr.length; };
+Buf.prototype.beU32=function(n){ this.ensure(4); this.a[this.n++]=(n>>>24)&255; this.a[this.n++]=(n>>>16)&255; this.a[this.n++]=(n>>>8)&255; this.a[this.n++]=n&255; };
+Buf.prototype.beU16=function(n){ this.ensure(2); this.a[this.n++]=(n>>>8)&255; this.a[this.n++]=n&255; };
+Buf.prototype.leU32=function(n){ this.ensure(4); this.a[this.n++]=n&255; this.a[this.n++]=(n>>>8)&255; this.a[this.n++]=(n>>>16)&255; this.a[this.n++]=(n>>>24)&255; };
+Buf.prototype.leU24=function(n){ this.ensure(3); this.a[this.n++]=n&255; this.a[this.n++]=(n>>>8)&255; this.a[this.n++]=(n>>>16)&255; };
+Buf.prototype.leU16=function(n){ this.ensure(2); this.a[this.n++]=n&255; this.a[this.n++]=(n>>>8)&255; };
+Buf.prototype.str=function(s){ for(let i=0;i<s.length;i++) this.u8(s.charCodeAt(i)); };
+Buf.prototype.done=function(){ return this.a.subarray(0,this.n); };
+
+function pngChunkInto(buf,type,dataArrays){
+  let len=0; for(const d of dataArrays) len+=d.length;
+  buf.beU32(len);
+  const crcBuf=new Buf(); crcBuf.str(type); for(const d of dataArrays) crcBuf.bytes(d);
+  const body=crcBuf.done();
+  buf.bytes(body);
+  buf.beU32(crc32(body));
+}
+function parsePNG(bytes){
+  let off=8; const chunks=[];
+  while(off<bytes.length){
+    const len=((bytes[off]<<24)|(bytes[off+1]<<16)|(bytes[off+2]<<8)|bytes[off+3])>>>0;
+    const type=String.fromCharCode(bytes[off+4],bytes[off+5],bytes[off+6],bytes[off+7]);
+    const data=bytes.subarray(off+8,off+8+len);
+    chunks.push({type,data});
+    off+=12+len;
+  }
+  return chunks;
+}
+function muxAPNG(pngs,w,h,delayNum,delayDen){
+  const buf=new Buf();
+  buf.bytes([137,80,78,71,13,10,26,10]);
+  const ihdr=parsePNG(pngs[0]).find(c=>c.type==='IHDR');
+  pngChunkInto(buf,'IHDR',[ihdr.data]);
+  const actl=new Buf(); actl.beU32(pngs.length); actl.beU32(0);
+  pngChunkInto(buf,'acTL',[actl.done()]);
+  let seq=0;
+  for(let idx=0; idx<pngs.length; idx++){
+    const idats=parsePNG(pngs[idx]).filter(c=>c.type==='IDAT');
+    const fctl=new Buf();
+    fctl.beU32(seq++); fctl.beU32(w); fctl.beU32(h); fctl.beU32(0); fctl.beU32(0);
+    fctl.beU16(delayNum); fctl.beU16(delayDen); fctl.u8(0); fctl.u8(0);
+    pngChunkInto(buf,'fcTL',[fctl.done()]);
+    for(const idat of idats){
+      if(idx===0){
+        pngChunkInto(buf,'IDAT',[idat.data]);
+      }else{
+        const sq=new Buf(); sq.beU32(seq++);
+        pngChunkInto(buf,'fdAT',[sq.done(),idat.data]);
+      }
+    }
+  }
+  pngChunkInto(buf,'IEND',[]);
+  return buf.done();
+}
+
+function extractBitstream(webpBytes){
+  let off=12;
+  while(off<webpBytes.length){
+    const cc=String.fromCharCode(webpBytes[off],webpBytes[off+1],webpBytes[off+2],webpBytes[off+3]);
+    const len=(webpBytes[off+4]|webpBytes[off+5]<<8|webpBytes[off+6]<<16|webpBytes[off+7]<<24)>>>0;
+    const dataStart=off+8;
+    if(cc==='VP8 '||cc==='VP8L'){
+      return {cc,data:webpBytes.subarray(dataStart,dataStart+len)};
+    }
+    off=dataStart+len+(len&1);
+  }
+  return null;
+}
+function webpChunkInto(buf,cc,dataArrays){
+  let len=0; for(const d of dataArrays) len+=d.length;
+  buf.str(cc); buf.leU32(len);
+  for(const d of dataArrays) buf.bytes(d);
+  if(len&1) buf.u8(0);
+}
+function muxWebP(webpFrames,w,h,delayMs){
+  const frameBuf=new Buf();
+  for(const fb of webpFrames){
+    const bs=extractBitstream(fb);
+    const bitBuf=new Buf();
+    webpChunkInto(bitBuf,bs.cc,[bs.data]);
+    const body=new Buf();
+    body.leU24(0); body.leU24(0);
+    body.leU24(w-1); body.leU24(h-1);
+    body.leU24(Math.max(1,Math.round(delayMs)));
+    body.u8(0x00);
+    body.bytes(bitBuf.done());
+    webpChunkInto(frameBuf,'ANMF',[body.done()]);
+  }
+  const vp8xBuf=new Buf();
+  vp8xBuf.u8(0x12); vp8xBuf.u8(0); vp8xBuf.u8(0); vp8xBuf.u8(0);
+  vp8xBuf.leU24(w-1); vp8xBuf.leU24(h-1);
+  const animBuf=new Buf();
+  animBuf.u8(0); animBuf.u8(0); animBuf.u8(0); animBuf.u8(0); animBuf.leU16(0);
+
+  const payload=new Buf();
+  payload.str('WEBP');
+  webpChunkInto(payload,'VP8X',[vp8xBuf.done()]);
+  webpChunkInto(payload,'ANIM',[animBuf.done()]);
+  payload.bytes(frameBuf.done());
+
+  const riff=new Buf();
+  riff.str('RIFF'); riff.leU32(payload.n); riff.bytes(payload.done());
+  return riff.done();
+}
+
+</script>
+</body>
+</html>
